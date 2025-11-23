@@ -32,7 +32,7 @@
 				}
 			},
 			{
-				"name": "loop_etl_tables",
+				"name": "loop tables",
 				"type": "ForEach",
 				"dependsOn": [
 					{
@@ -50,7 +50,7 @@
 					},
 					"activities": [
 						{
-							"name": "lookup if data exists",
+							"name": "new data exists flag",
 							"type": "Lookup",
 							"dependsOn": [],
 							"policy": {
@@ -65,7 +65,7 @@
 								"source": {
 									"type": "AzureSqlSource",
 									"sqlReaderQuery": {
-										"value": "select case when exists (select 1 from [@{item().schema}].[@{item().table}] where [@{item().cdc_col}]>'@{item().lastmodified_on}')\n\n\n",
+										"value": "@concat(\r\n'select case when exists (select 1 from [', item().schema, '].[', item().table, '] where [',\r\nitem().cdc_col, '] > ''', string(item().lastmodified_on), ''') then 1 else 0 end as data_flag'\r\n)\r\n",
 										"type": "Expression"
 									},
 									"queryTimeout": "02:00:00",
@@ -78,11 +78,11 @@
 							}
 						},
 						{
-							"name": "If new data exists",
+							"name": "if data_flag",
 							"type": "IfCondition",
 							"dependsOn": [
 								{
-									"activity": "lookup if data exists",
+									"activity": "new data exists flag",
 									"dependencyConditions": [
 										"Succeeded"
 									]
@@ -91,12 +91,24 @@
 							"userProperties": [],
 							"typeProperties": {
 								"expression": {
-									"value": "@greater(activity('lookup if data exists').output.value,1 )",
+									"value": "@greater(activity('new data exists flag').output.firstRow.data_flag,0 )",
 									"type": "Expression"
 								},
+								"ifFalseActivities": [
+									{
+										"name": "Fail1",
+										"type": "Fail",
+										"dependsOn": [],
+										"userProperties": [],
+										"typeProperties": {
+											"message": "if false",
+											"errorCode": "hit false in if"
+										}
+									}
+								],
 								"ifTrueActivities": [
 									{
-										"name": "copy azure sql to parq",
+										"name": "Copy data azSQL to parq",
 										"type": "Copy",
 										"dependsOn": [],
 										"policy": {
@@ -111,7 +123,7 @@
 											"source": {
 												"type": "AzureSqlSource",
 												"sqlReaderQuery": {
-													"value": "SELECT * \nFROM [@{item().schema}].[@{item().table}]\nWHERE [@{item().cdc_col}] > CONVERT(datetime2, '@{item().lastmodified_on}', 127)\n",
+													"value": "@concat(\n  'SELECT * FROM [', item().schema, '].[', item().table, '] ',\n  'WHERE [', item().cdc_col, '] > ''', string(item().lastmodified_on), ''''\n)",
 													"type": "Expression"
 												},
 												"queryTimeout": "02:00:00",
@@ -153,7 +165,7 @@
 														"type": "Expression"
 													},
 													"filename": {
-														"value": "@concat(item().table,'_',utcNow())",
+														"value": "@concat(item().table,utcNow())",
 														"type": "Expression"
 													}
 												}
@@ -161,53 +173,39 @@
 										]
 									},
 									{
-										"name": "If rowsRead",
-										"type": "IfCondition",
+										"name": "upd lastmodified_on",
+										"type": "Script",
 										"dependsOn": [
 											{
-												"activity": "copy azure sql to parq",
+												"activity": "Copy data azSQL to parq",
 												"dependencyConditions": [
 													"Succeeded"
 												]
 											}
 										],
+										"policy": {
+											"timeout": "0.12:00:00",
+											"retry": 0,
+											"retryIntervalInSeconds": 30,
+											"secureOutput": false,
+											"secureInput": false
+										},
 										"userProperties": [],
+										"linkedServiceName": {
+											"referenceName": "ls_AzureSqlDatabase",
+											"type": "LinkedServiceReference"
+										},
 										"typeProperties": {
-											"expression": {
-												"value": "@greater(activity('copy azure sql to parq').output.rowsCopied,0 )",
-												"type": "Expression"
-											},
-											"ifTrueActivities": [
+											"scripts": [
 												{
-													"name": "updt SPOTIFY_ETL_CONTROL lastmodified date",
-													"type": "Script",
-													"dependsOn": [],
-													"policy": {
-														"timeout": "0.12:00:00",
-														"retry": 0,
-														"retryIntervalInSeconds": 30,
-														"secureOutput": false,
-														"secureInput": false
-													},
-													"userProperties": [],
-													"linkedServiceName": {
-														"referenceName": "ls_AzureSqlDatabase",
-														"type": "LinkedServiceReference"
-													},
-													"typeProperties": {
-														"scripts": [
-															{
-																"type": "Query",
-																"text": {
-																	"value": "update spotify_etl_control\nset lastmodified_on = (select max(@{item().cdc_col}) from [@{item().schema}].[@{item().table}]) \nwhere [table] = '@{item().table}'",
-																	"type": "Expression"
-																}
-															}
-														],
-														"scriptBlockExecutionTimeout": "02:00:00"
+													"type": "Query",
+													"text": {
+														"value": "@concat(\n  'UPDATE ', variables('etl_control_tablename'),\n  ' SET [lastmodified_on] = (SELECT MAX([', item().cdc_col, ']) FROM [', item().schema, '].[', item().table, ']) ',\n  'WHERE [table] = ''', item().table, ''''\n)",
+														"type": "Expression"
 													}
 												}
-											]
+											],
+											"scriptBlockExecutionTimeout": "02:00:00"
 										}
 									}
 								]
