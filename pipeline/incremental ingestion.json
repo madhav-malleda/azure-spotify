@@ -1,0 +1,228 @@
+{
+	"name": "incremental ingestion",
+	"properties": {
+		"activities": [
+			{
+				"name": "lookup_etl_control",
+				"type": "Lookup",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzureSqlSource",
+						"sqlReaderQuery": {
+							"value": "@concat('select * from ',variables('etl_control_tablename'))",
+							"type": "Expression"
+						},
+						"queryTimeout": "02:00:00",
+						"partitionOption": "None"
+					},
+					"dataset": {
+						"referenceName": "ds_etl_control",
+						"type": "DatasetReference"
+					},
+					"firstRowOnly": false
+				}
+			},
+			{
+				"name": "loop_etl_tables",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "lookup_etl_control",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@activity('lookup_etl_control').output.value",
+						"type": "Expression"
+					},
+					"activities": [
+						{
+							"name": "lookup if data exists",
+							"type": "Lookup",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.12:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"source": {
+									"type": "AzureSqlSource",
+									"sqlReaderQuery": {
+										"value": "select case when exists (select 1 from [@{item().schema}].[@{item().table}] where [@{item().cdc_col}]>'@{item().lastmodified_on}')\n\n\n",
+										"type": "Expression"
+									},
+									"queryTimeout": "02:00:00",
+									"partitionOption": "None"
+								},
+								"dataset": {
+									"referenceName": "ds_AzureSqlTbl_dataCheck",
+									"type": "DatasetReference"
+								}
+							}
+						},
+						{
+							"name": "If new data exists",
+							"type": "IfCondition",
+							"dependsOn": [
+								{
+									"activity": "lookup if data exists",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"userProperties": [],
+							"typeProperties": {
+								"expression": {
+									"value": "@greater(activity('lookup if data exists').output.value,1 )",
+									"type": "Expression"
+								},
+								"ifTrueActivities": [
+									{
+										"name": "copy azure sql to parq",
+										"type": "Copy",
+										"dependsOn": [],
+										"policy": {
+											"timeout": "0.12:00:00",
+											"retry": 0,
+											"retryIntervalInSeconds": 30,
+											"secureOutput": false,
+											"secureInput": false
+										},
+										"userProperties": [],
+										"typeProperties": {
+											"source": {
+												"type": "AzureSqlSource",
+												"sqlReaderQuery": {
+													"value": "SELECT * \nFROM [@{item().schema}].[@{item().table}]\nWHERE [@{item().cdc_col}] > CONVERT(datetime2, '@{item().lastmodified_on}', 127)\n",
+													"type": "Expression"
+												},
+												"queryTimeout": "02:00:00",
+												"partitionOption": "None"
+											},
+											"sink": {
+												"type": "ParquetSink",
+												"storeSettings": {
+													"type": "AzureBlobFSWriteSettings"
+												},
+												"formatSettings": {
+													"type": "ParquetWriteSettings"
+												}
+											},
+											"enableStaging": false,
+											"translator": {
+												"type": "TabularTranslator",
+												"typeConversion": true,
+												"typeConversionSettings": {
+													"allowDataTruncation": true,
+													"treatBooleanAsNumber": false
+												}
+											}
+										},
+										"inputs": [
+											{
+												"referenceName": "AzureSqlTable1",
+												"type": "DatasetReference"
+											}
+										],
+										"outputs": [
+											{
+												"referenceName": "ds_sink_azuresql_to_parq",
+												"type": "DatasetReference",
+												"parameters": {
+													"container": "spotify-bronze",
+													"folder": {
+														"value": "@item().table",
+														"type": "Expression"
+													},
+													"filename": {
+														"value": "@concat(item().table,'_',utcNow())",
+														"type": "Expression"
+													}
+												}
+											}
+										]
+									},
+									{
+										"name": "If rowsRead",
+										"type": "IfCondition",
+										"dependsOn": [
+											{
+												"activity": "copy azure sql to parq",
+												"dependencyConditions": [
+													"Succeeded"
+												]
+											}
+										],
+										"userProperties": [],
+										"typeProperties": {
+											"expression": {
+												"value": "@greater(activity('copy azure sql to parq').output.rowsCopied,0 )",
+												"type": "Expression"
+											},
+											"ifTrueActivities": [
+												{
+													"name": "updt SPOTIFY_ETL_CONTROL lastmodified date",
+													"type": "Script",
+													"dependsOn": [],
+													"policy": {
+														"timeout": "0.12:00:00",
+														"retry": 0,
+														"retryIntervalInSeconds": 30,
+														"secureOutput": false,
+														"secureInput": false
+													},
+													"userProperties": [],
+													"linkedServiceName": {
+														"referenceName": "ls_AzureSqlDatabase",
+														"type": "LinkedServiceReference"
+													},
+													"typeProperties": {
+														"scripts": [
+															{
+																"type": "Query",
+																"text": {
+																	"value": "update spotify_etl_control\nset lastmodified_on = (select max(@{item().cdc_col}) from [@{item().schema}].[@{item().table}]) \nwhere [table] = '@{item().table}'",
+																	"type": "Expression"
+																}
+															}
+														],
+														"scriptBlockExecutionTimeout": "02:00:00"
+													}
+												}
+											]
+										}
+									}
+								]
+							}
+						}
+					]
+				}
+			}
+		],
+		"variables": {
+			"etl_control_tablename": {
+				"type": "String",
+				"defaultValue": "dbo.SPOTIFY_ETL_CONTROL"
+			}
+		},
+		"annotations": []
+	}
+}
