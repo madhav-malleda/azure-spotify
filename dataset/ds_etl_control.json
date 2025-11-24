@@ -1,0 +1,16 @@
+{
+	"name": "ds_etl_control",
+	"properties": {
+		"linkedServiceName": {
+			"referenceName": "ls_AzureSqlDatabase",
+			"type": "LinkedServiceReference"
+		},
+		"annotations": [],
+		"type": "AzureSqlTable",
+		"schema": [],
+		"typeProperties": {
+			"schema": "dbo",
+			"table": "SPOTIFY_ETL_CONTROL"
+		}
+	}
+}
